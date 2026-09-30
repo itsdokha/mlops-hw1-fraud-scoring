@@ -1,0 +1,12 @@
+{
+  "train_rows": 629144,
+  "validation_rows": 157287,
+  "train_frauds": 3665,
+  "validation_frauds": 839,
+  "validation_roc_auc": 0.9953316577971368,
+  "validation_average_precision": 0.8335214734096071,
+  "validation_f1": 0.767189384800965,
+  "threshold": 0.15502649461120824,
+  "best_iteration": 497,
+  "validation_method": "last 20% by transaction_time"
+}

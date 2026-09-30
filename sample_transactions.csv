@@ -1,0 +1,3 @@
+transaction_id,transaction_time,merch,cat_id,amount,name_1,name_2,gender,street,one_city,us_state,post_code,lat,lon,population_city,jobs,merchant_lat,merchant_lon
+sample-001,2019-12-27 14:30,demo_store_1,1,25.50,Demo,Person,F,demo_street,demo_city,NY,10001,40.75,-73.99,8000000,engineer,40.76,-73.98
+sample-002,2019-12-28 02:15,demo_store_2,7,9800,Demo,Person,M,demo_street,demo_city,NY,10001,40.75,-73.99,8000000,engineer,34.05,-118.24
