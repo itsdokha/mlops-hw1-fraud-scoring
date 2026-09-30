@@ -1,61 +1,77 @@
-# Потоковый скоринг транзакций
+# Скоринг транзакций из Kafka
 
-Учебный сервис получает строки CSV через Streamlit, отправляет каждую транзакцию в Kafka, выполняет препроцессинг и CPU-инференс, публикует `transaction_id`, `score`, `fraud_flag` в топик `scores` и сохраняет результаты в PostgreSQL. В интерфейсе доступны последние 10 транзакций с флагом фрода и распределение скоров последних 100 транзакций.
+Сервис читает транзакции из топика `transactions`, рассчитывает вероятность фрода моделью CatBoost на CPU и записывает `transaction_id`, `score`, `fraud_flag` в топик `scores`. Отдельный сервис сохраняет результаты в PostgreSQL. В Streamlit можно отправить CSV и посмотреть последние результаты.
 
-## Быстрый запуск
+## Что понадобится
 
-Нужны Docker Engine и Docker Compose V2 (`docker compose`). Порты 8501, 9095 и 5432 должны быть свободны.
+- Docker Engine и Docker Compose V2 (команда `docker compose`);
+- свободные порты 8501, 9095 и 5432;
+- доступ к интернету при первой сборке образов.
+
+Файлы модели уже лежат в `model/`. Датасеты для запуска не нужны.
+
+## Запуск
 
 ```bash
+git clone https://github.com/itsdokha/mlops-hw1-fraud-scoring.git
+cd mlops-hw1-fraud-scoring
 docker compose up --build -d
 docker compose ps
 ```
 
-Откройте <http://localhost:8501>, загрузите `sample_transactions.csv` и нажмите **Отправить в Kafka**. Затем откройте вкладку **Результаты** и нажмите **Посмотреть результаты**. Обработка асинхронная: если результатов ещё нет, нажмите кнопку повторно через несколько секунд. Можно загрузить `data/test.csv` из соревнования. CSV должен иметь заголовок; каждая строка отправляется отдельным JSON-сообщением. Файл `data/sample_submition.csv` содержит только `index,prediction` и не является входным файлом транзакций; интерфейс отклонит его до отправки в Kafka.
+Дождитесь, пока сервисы `kafka`, `postgres`, `scorer`, `scores-sink` и `ui` перейдут в состояние `running` (для Kafka и PostgreSQL — `healthy`). Первый запуск может занять несколько минут из-за загрузки образов и Python-пакетов.
 
-Ожидаемый результат для демонстрационного файла: в таблице PostgreSQL появляются две записи; у `sample-001` флаг 0, у `sample-002` флаг 1.
+Интерфейс: <http://localhost:8501>.
 
-Проверка без интерфейса:
+## Проверка на примере
+
+1. Откройте вкладку **Загрузить транзакции**.
+2. Загрузите файл `sample_transactions.csv` из корня репозитория и нажмите **Отправить в Kafka**.
+3. Перейдите во вкладку **Результаты** и нажмите **Посмотреть результаты**. Если записей пока нет, повторите через несколько секунд.
+4. Проверьте таблицу и гистограмму. Транзакция `sample-002` должна появиться в таблице фрода со скором около `0.6647`. Транзакция `sample-001` получает флаг `0` и отображается только на гистограмме.
+
+Проверить обе записи напрямую в PostgreSQL:
 
 ```bash
-docker compose exec postgres psql -U fraud -d fraud -c "SELECT transaction_id, score, fraud_flag FROM transaction_scores ORDER BY scored_at DESC LIMIT 10;"
-docker compose exec kafka kafka-console-consumer --bootstrap-server localhost:9092 --topic scores --from-beginning --max-messages 2
-docker compose logs scorer scores-sink
+docker compose exec postgres psql -U fraud -d fraud -c "SELECT transaction_id, score, fraud_flag FROM transaction_scores WHERE transaction_id LIKE 'sample-%' ORDER BY transaction_id;"
 ```
 
-Остановка:
+Проверить сообщения выходного топика:
 
 ```bash
+docker compose exec kafka kafka-console-consumer --bootstrap-server localhost:9092 --topic scores --from-beginning --max-messages 2
+```
+
+Ожидаемый формат одного сообщения:
+
+```json
+{"transaction_id":"sample-002","score":0.6647,"fraud_flag":1}
+```
+
+Значение `score` в примере округлено. В Kafka и PostgreSQL хранится полное значение.
+
+## Загрузка данных соревнования
+
+Скачайте `test.csv` по [ссылке на соревнование](https://www.kaggle.com/t/1918f3f6435300327d38d6c596f97394) из задания. Во вкладке **Загрузить транзакции** выберите этот файл и нажмите **Отправить в Kafka**. Каждая строка CSV отправляется отдельным сообщением. Обработка большого файла может занять несколько минут; прогресс проверяйте в разделе **Результаты** или в логах.
+
+CSV должен содержать как минимум колонки `transaction_time`, `amount`, `lat`, `lon`, `merchant_lat`, `merchant_lon`, `cat_id`, `population_city`. Дополнительные признаки модели: `merch`, `gender`, `us_state`, `jobs`. Если в файле нет `transaction_id`, интерфейс создаст его для каждой строки.
+
+`sample_submition.csv` содержит только `index,prediction`: это шаблон ответа Kaggle, а не входные транзакции. Интерфейс отклонит такой файл.
+
+## Логи и остановка
+
+```bash
+docker compose logs -f scorer scores-sink
 docker compose down
 ```
 
-Для удаления данных PostgreSQL используйте `docker compose down -v`.
+`docker compose down` останавливает контейнеры и сохраняет данные PostgreSQL. Если нужно начать проверку с пустой базы, выполните `docker compose down -v`; эта команда удалит сохранённые результаты.
 
-## Формат сообщений
+## Модель и повторное обучение
 
-Входной топик `transactions` содержит JSON:
+Сервис использует готовый файл `model/fraud_catboost.cbm`; обучение внутри работающих контейнеров не выполняется. Порог фрода и метрики отложенной выборки находятся в `model/metrics.json`. Порог можно изменить переменной `FRAUD_THRESHOLD` у сервиса `scorer` в `docker-compose.yml`.
 
-```json
-{"transaction_id":"sample-001","data":{"transaction_time":"2019-12-27 14:30","merch":"demo_store_1","cat_id":"1","amount":"25.50","lat":"40.75","lon":"-73.99","merchant_lat":"40.76","merchant_lon":"-73.98"}}
-```
-
-Поддерживается и плоский JSON с `transaction_id` и полями транзакции. UI берёт идентификатор из `transaction_id`, `trans_num` или `id`; если его нет, создаёт UUID. Выходной топик `scores` содержит ровно три поля:
-
-```json
-{"transaction_id":"sample-001","score":0.026,"fraud_flag":0}
-```
-
-Число `score` выше приведено для иллюстрации формата; фактическое значение рассчитывается моделью.
-
-## Препроцессинг и модель
-
-`fraud_service/preprocessing.py` строит признаки из суммы, времени, координат клиента и продавца, расстояния, населения города, категории покупки, пола, штата, профессии и продавца. Схема согласована с добавленными `data/train.csv` и `data/test.csv`: `transaction_time`, `merch`, `cat_id`, `amount`, `gender`, `us_state`, `lat`, `lon`, `population_city`, `jobs`, `merchant_lat`, `merchant_lon`. Файлы без обязательных колонок отклоняются; пустые значения и необязательные признаки заполняются нейтральными значениями.
-
-`model/fraud_catboost.cbm` — CatBoost, обученный на предоставленном `data/train.csv`; `model/metrics.json` хранит порог и метрики отложенной выборки. Разбиение выполнено по времени транзакции: первые 80% для обучения, последние 20% для проверки. Сервис загружает готовый артефакт и выполняет только CPU-инференс. Порог берётся из `model/metrics.json`; при необходимости его можно переопределить переменной `FRAUD_THRESHOLD` у сервиса `scorer`.
-
-На отложенной части получены ROC-AUC 0.9953, Average Precision 0.8335 и F1 0.7672 при пороге 0.1550. Порог выбран на этой же части данных, поэтому F1 следует считать оценкой подбора порога, а не результатом независимого теста.
-
-Исходные данные исключены из Git и Docker-образа. Для повторного обучения вне сервиса:
+Для повторного обучения положите размеченный `train.csv` в папку `data/` и выполните:
 
 ```bash
 python3 -m venv .venv
@@ -64,23 +80,17 @@ python3 -m venv .venv
 docker compose up --build -d
 ```
 
-## Состав проекта
+Папка `data/` исключена из Git и Docker-образа. Новые артефакты появятся в `model/`.
 
-- `fraud_service/scorer_service.py` — Kafka consumer/producer, вызов препроцессинга и модели;
-- `fraud_service/preprocessing.py` — преобразование признаков;
-- `fraud_service/model.py` — CPU-инференс;
-- `scripts/train_model.py` — воспроизводимое офлайн-обучение;
-- `fraud_service/sink_service.py` — Kafka consumer и идемпотентная запись в PostgreSQL;
-- `db/init.sql` — создание витрины;
-- `ui/app.py` — загрузка CSV и просмотр результатов;
-- `docker-compose.yml` — Kafka, PostgreSQL и сервисы приложения.
+## Файлы проекта
 
-Скоринг подтверждает Kafka offset после публикации результата, а сервис записи — после транзакции в PostgreSQL. При повторной доставке результат обновляется по `transaction_id`. Некорректные сообщения логируются и пропускаются.
-
-## Локальная проверка кода
-
-```bash
-python3 -m unittest discover -s tests -v
-```
-
-Код и сервис предназначены для учебной локальной среды. Учётные данные PostgreSQL в Compose демонстрационные.
+| Путь | Назначение |
+| --- | --- |
+| `fraud_service/preprocessing.py` | Проверка колонок и подготовка признаков |
+| `fraud_service/model.py` | CPU-инференс модели |
+| `fraud_service/scorer_service.py` | Чтение `transactions` и запись `scores` |
+| `fraud_service/sink_service.py` | Запись скоров из Kafka в PostgreSQL |
+| `ui/app.py` | Загрузка CSV и просмотр результатов |
+| `db/init.sql` | Создание таблицы результатов |
+| `scripts/train_model.py` | Отдельный скрипт обучения |
+| `docker-compose.yml` | Запуск всех сервисов |
